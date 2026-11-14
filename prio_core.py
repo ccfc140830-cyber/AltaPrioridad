@@ -74,12 +74,13 @@ def list_entries():
     return out
 
 
-def set_entry(exe, prio_name):
+def set_entry(exe, prio_name, do_backup=True):
     if not valid_name(exe):
         raise ValueError("Nombre invalido: debe ser un .exe sin ruta")
     if prio_name not in PRIORITIES:
         raise ValueError("Prioridad invalida")
-    backup()
+    if do_backup:
+        backup()
     path = f"{BASE}\\{exe.strip()}\\{SUB}"
     with winreg.CreateKeyEx(HIVE, path, 0, winreg.KEY_SET_VALUE | VIEW) as k:
         winreg.SetValueEx(k, VALUE, 0, winreg.REG_DWORD, PRIORITIES[prio_name][0])
@@ -94,9 +95,10 @@ def _is_empty(path):
         return False
 
 
-def remove_entry(exe):
+def remove_entry(exe, do_backup=True):
     """Borra solo CpuPriorityClass; limpia claves vacias, deja lo demas."""
-    backup()
+    if do_backup:
+        backup()
     perf = f"{BASE}\\{exe}\\{SUB}"
     try:
         with _open(perf, winreg.KEY_SET_VALUE) as k:
@@ -140,9 +142,10 @@ def import_json(path):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     n = 0
+    backup()
     for exe, prio in data.items():
         if valid_name(exe) and prio in PRIORITIES:
-            set_entry(exe, prio)
+            set_entry(exe, prio, do_backup=False)
             n += 1
     return n
 
@@ -178,20 +181,64 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
-def running_processes():
-    """[(pid, nombre.exe)] de todos los procesos."""
+def process_info():
+    """[(pid, ppid, nombre.exe)] de todos los procesos."""
     snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     out = []
     if snap in (None, wintypes.HANDLE(-1).value):
         return out
     pe = PROCESSENTRY32W()
     pe.dwSize = ctypes.sizeof(pe)
-    ok = ctypes.windll.kernel32.Process32FirstW(wintypes.HANDLE(snap), ctypes.byref(pe))
+    ok = k32.Process32FirstW(wintypes.HANDLE(snap), ctypes.byref(pe))
     while ok:
-        out.append((pe.th32ProcessID, pe.szExeFile))
-        ok = ctypes.windll.kernel32.Process32NextW(wintypes.HANDLE(snap), ctypes.byref(pe))
+        out.append((pe.th32ProcessID, pe.th32ParentProcessID, pe.szExeFile))
+        ok = k32.Process32NextW(wintypes.HANDLE(snap), ctypes.byref(pe))
     k32.CloseHandle(wintypes.HANDLE(snap))
     return out
+
+
+def running_processes():
+    """[(pid, nombre.exe)] de todos los procesos."""
+    return [(p, e) for p, _, e in process_info()]
+
+
+k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+k32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+
+
+def exe_path(pid):
+    """Ruta completa del .exe del proceso, o '' si no se puede leer."""
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = wintypes.DWORD(len(buf))
+        return buf.value if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def get_class_flag(pid):
+    """Flag crudo de GetPriorityClass (0x20 Normal, 0x80 High...), o None."""
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        return k32.GetPriorityClass(h) or None
+    finally:
+        k32.CloseHandle(h)
+
+
+def set_class_flag(pid, flag):
+    h = k32.OpenProcess(PROCESS_SET_INFORMATION, False, pid)
+    if not h:
+        return False
+    try:
+        return bool(k32.SetPriorityClass(h, flag))
+    finally:
+        k32.CloseHandle(h)
 
 
 def live_priority(pid):
