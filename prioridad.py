@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import prio_core as core
 import prio_profiles as prof
@@ -380,7 +380,6 @@ class App(tk.Tk):
         self.nb.bind("<<NotebookTabChanged>>", lambda _: self.on_context())
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.set_panel(self.panel_open, resize=False)
-        self.apply_panel_state()
         self.refresh()
         self.refresh_profiles()
         self.after(3000, self.autorefresh)
@@ -443,7 +442,7 @@ class App(tk.Tk):
         tb.pack(fill="x")
         ttk.Button(tb, text="Agregar procesos...", command=self.prof_add_triggers).pack(side="left")
         ttk.Button(tb, text="Quitar marcados", command=self.prof_remove_triggers).pack(side="left", padx=6)
-        ttk.Label(tb, text="(el panel de procesos esta desactivado en esta pestana)",
+        ttk.Label(tb, text="(para un perfil nuevo usa el panel de la derecha)",
                   foreground="gray").pack(side="left", padx=6)
 
         ttk.Label(tab, text="Juegos detectados en ejecucion sin perfil (carpetas de Steam, Epic, GOG, Xbox...):",
@@ -539,28 +538,21 @@ class App(tk.Tk):
         if self.tab_kind() == "reg":
             self.target_var.set(f"Destino: registro permanente, prioridad {self.prio.get()} (se escribe en HKLM).")
         else:
-            self.target_var.set("Desactivado en la pestana Perfiles de juego. Vuelve a Permanente (registro) "
-                                "para usar este panel.")
-
-    def apply_panel_state(self):
-        """El panel solo funciona en la pestana Permanente; en Perfiles queda deshabilitado."""
-        on = self.tab_kind() == "reg"
-        self.pp.set_enabled(on)
-        for w in (self.pq_entry, self.hide_cb, self.btn_add, self.btn_rm):
-            w.state(["!disabled"] if on else ["disabled"])
-        self.update_target()
-        if on:
-            self.refresh_panel()
+            self.target_var.set("Destino: perfiles nuevos. Al agregar se te pedira el nombre del perfil; "
+                                "los procesos elegidos seran sus ejecutables del juego.")
 
     def on_context(self):
-        self.apply_panel_state()
+        self.update_target()
         self.refresh_triggers()
+        self.refresh_panel()
 
     def panel_excluded(self):
-        return {e.lower() for e in self._entries}
+        if self.tab_kind() == "reg":
+            return {e.lower() for e in self._entries}
+        return {t.lower() for p in self.pdata["profiles"] for t in p["triggers"]}
 
     def refresh_panel(self):
-        if not self.panel_open or self.tab_kind() != "reg":
+        if not self.panel_open:
             return
         excl = self.panel_excluded()
         q = self.pq.get().strip().lower()
@@ -578,20 +570,58 @@ class App(tk.Tk):
         self.pp.set_rows(rows)
 
     def panel_add(self, names=None):
-        if self.tab_kind() != "reg":
-            return
         if names is None:
             names = [self.pp.set(i, "exe") for i in self.pp.picked()]
         if not names:
             self.say("Marca casillas o selecciona procesos en el panel.")
             return
-        self.add_many(names)
+        if self.tab_kind() == "reg":
+            self.add_many(names)
+            return
+        if self.new_profile_from(names):
+            self.pp.uncheck([n.lower() for n in names])
 
     def panel_remove(self):
         if self.tab_kind() == "reg":
             self.remove()
+        else:
+            self.prof_delete()   # en Perfiles, Quitar elimina los perfiles marcados (pide confirmacion)
 
-    # ---- ejecutables de un perfil (con el panel desactivado en esta pestana) ----
+    def new_profile_from(self, names):
+        """Crea un perfil con estos ejecutables; pide el nombre. Devuelve True si se creo."""
+        taken = {p["name"].lower() for p in self.pdata["profiles"]}
+        name = os.path.splitext(names[0])[0]
+        while True:
+            name = simpledialog.askstring("Nuevo perfil", "Nombre del perfil para: " + ", ".join(names),
+                                          initialvalue=name, parent=self)
+            if name is None:
+                self.say("Perfil cancelado: no se creo nada.")
+                return False
+            name = name.strip()
+            if not name:
+                messagebox.showerror("Nombre", "Escribe un nombre para el perfil.", parent=self)
+            elif name.lower() in taken:
+                messagebox.showerror("Nombre", f"Ya existe un perfil llamado «{name}». Elige otro nombre.", parent=self)
+            else:
+                break
+        self.pdata["profiles"].append(prof.new_profile(name, names))
+        self.save_profiles()
+        self.prof_tick(reschedule=False)
+        self.pt.selection_set(name)
+        self.say(f"Perfil «{name}» creado con {len(names)} ejecutable(s). Ajustalo con Editar...")
+        return True
+
+    # ---- ejecutables de un perfil ----
+    def add_triggers(self, p, names):
+        have = {t.lower() for t in p["triggers"]}
+        new = [n for n in names if n.lower() not in have]
+        if not new:
+            return
+        p["triggers"].extend(new)
+        self.save_profiles()
+        self.prof_tick(reschedule=False)
+        self.say(f"{len(new)} ejecutable(s) agregado(s) al perfil «{p['name']}».")
+
     def prof_add_triggers(self):
         p = self.cur_profile()
         if not p:
@@ -599,14 +629,7 @@ class App(tk.Tk):
             return
         d = PickProcess(self)
         self.wait_window(d)
-        have = {t.lower() for t in p["triggers"]}
-        new = [n for n in d.result or [] if n.lower() not in have]
-        if not new:
-            return
-        p["triggers"].extend(new)
-        self.save_profiles()
-        self.prof_tick(reschedule=False)
-        self.say(f"{len(new)} ejecutable(s) agregado(s) al perfil «{p['name']}».")
+        self.add_triggers(p, d.result or [])
 
     def prof_remove_triggers(self):
         p = self.cur_profile()

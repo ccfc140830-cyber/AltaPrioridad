@@ -99,17 +99,15 @@ try:
         tr._sort = None; tr._arrows()
     print("ordenar por columna OK (todas las listas)")
 
-    # --- el panel se deshabilita en la pestana Perfiles ---
+    # --- el panel sigue habilitado al cambiar a la pestana Perfiles ---
     first = app.pp.get_children()[0]
     app.nb.select(1); app.update()
-    assert app.pp._enabled is False and app.btn_add.instate(["disabled"]) and app.pq_entry.instate(["disabled"])
-    assert "Desactivado" in app.target_var.get()
-    n0 = len(core.list_entries())
-    click_check(app.pp, first); assert app.pp.checked() == [], "casilla inerte"
-    app.panel_add([first]); app.update(); assert len(core.list_entries()) == n0, "no agrega"
+    assert app.pp._enabled and not app.btn_add.instate(["disabled"]) and not app.pq_entry.instate(["disabled"])
+    assert "Desactivado" not in app.target_var.get()
+    click_check(app.pp, first); assert app.pp.checked() == [first], "casilla activa en Perfiles"
+    app.pp.uncheck([first])
     app.nb.select(0); app.update()
-    assert app.pp._enabled is True and not app.btn_add.instate(["disabled"])
-    print("panel deshabilitado en Perfiles OK")
+    print("panel habilitado en Perfiles OK")
 
     # --- pestana registro: agregar con flecha, doble clic y quitar ---
     app.prio.set("Alta")
@@ -152,20 +150,54 @@ try:
     app.refresh_profiles(); app.pt.selection_set("GameX"); app.update()
     assert app.cur_profile()["name"] == "GameX"
     assert [app.tt.set(i, "exe") for i in app.tt.get_children()] == ["gamex.exe"]
-    class FakePick:                           # el dialogo modal se sustituye por una lista fija
+    assert "perfiles nuevos" in app.target_var.get()
+    assert "gamex.exe" not in app.pp.get_children(), "ejecutables de perfiles existentes salen del panel"
+    # panel: Agregar crea un perfil NUEVO y pide el nombre (duplicado y vacio se rechazan)
+    answers = iter(["gamex", "  ", "Mi Juego"])
+    asked = []
+    ui.simpledialog.askstring = lambda *a, **k: (asked.append(k.get("initialvalue")), next(answers))[1]
+    shown = []
+    ui.messagebox.showerror = lambda *a, **k: shown.append(a[1])
+    app.pp.toggle("otro.exe", True); app.pp.toggle("otro2.exe", True)
+    app.panel_add(); app.update()
+    assert asked[0] == "otro" and len(shown) == 2, (asked, shown)
+    assert [p["name"] for p in app.pdata["profiles"]] == ["GameX", "Mi Juego"]
+    assert app.pdata["profiles"][1]["triggers"] == ["otro.exe", "otro2.exe"]
+    assert app.cur_profile()["name"] == "Mi Juego", "el perfil nuevo queda seleccionado"
+    assert "otro.exe" not in app.pp.get_children() and app.pp.checked() == []
+    assert pp.load()["profiles"][1]["name"] == "Mi Juego", "guardado en disco"
+    # cancelar el nombre: no crea nada y el proceso sigue en el panel
+    c = app.pp.get_children()[0]; cexe = app.pp.set(c, "exe")
+    ui.simpledialog.askstring = lambda *a, **k: None
+    app.panel_add([cexe]); app.update()
+    assert len(app.pdata["profiles"]) == 2 and c in app.pp.get_children()
+    # doble clic en un proceso: tambien crea perfil y pide nombre
+    ui.simpledialog.askstring = lambda *a, **k: "Doble"
+    app.pp.see(c); app.update()
+    x, y, w, h = app.pp.bbox(c, "exe")
+    ev = Ev(); ev.x, ev.y = x + 10, y + h // 2
+    app.pp._dbl(ev); app.update()
+    assert [p["name"] for p in app.pdata["profiles"]] == ["GameX", "Mi Juego", "Doble"]
+    assert app.pdata["profiles"][2]["triggers"] == [cexe] and c not in app.pp.get_children()
+    # Quitar en Perfiles: elimina los perfiles marcados (con confirmacion)
+    app.pt.toggle("Doble", True); app.panel_remove(); app.update()
+    assert [p["name"] for p in app.pdata["profiles"]] == ["GameX", "Mi Juego"]
+    assert c in app.pp.get_children(), "sus procesos vuelven al panel"
+    print("perfiles: el panel crea perfiles nuevos pidiendo nombre OK")
+    # botones locales de la pestana (selector modal sustituido por una lista fija)
+    app.pt.selection_set("GameX"); app.update()
+    class FakePick:
         def __init__(self, master): self.result = ["otro.exe", "otro2.exe", "GameX.exe"]
     ui.PickProcess = FakePick; app.wait_window = lambda d: None
     app.prof_add_triggers(); app.update()
     assert app.cur_profile()["triggers"] == ["gamex.exe", "otro.exe", "otro2.exe"], app.cur_profile()["triggers"]
-    assert len(app.tt.get_children()) == 3
     app.tt.toggle("otro.exe", True); app.prof_remove_triggers(); app.update()
     assert app.cur_profile()["triggers"] == ["gamex.exe", "otro2.exe"]
     app.tt.toggle("gamex.exe", True); app.tt.toggle("otro2.exe", True)
-    shown = []
-    ui.messagebox.showerror = lambda *a, **k: shown.append(a)
+    shown.clear()
     app.prof_remove_triggers(); assert shown and len(app.cur_profile()["triggers"]) == 2, "no deja perfil vacio"
     app.tt.uncheck(["gamex.exe", "otro2.exe"])
-    print("perfiles: agregar/quitar ejecutables OK")
+    print("perfiles: botones locales agregan/quitan ejecutables OK")
 
     # --- casillas en perfiles: activar/desactivar y crear varios desde detectados ---
     app.pt.toggle("GameX", True); app.prof_toggle()
@@ -175,9 +207,9 @@ try:
     app.refresh_profiles(); app.ct.toggle_all()
     assert len(app.ct.checked()) == 2
     app.prof_from_candidates()
-    assert {p["name"] for p in app.pdata["profiles"]} == {"GameX", "a", "b"}
+    assert {p["name"] for p in app.pdata["profiles"]} == {"GameX", "Mi Juego", "a", "b"}
     app.pt.uncheck(["GameX"]); app.pt.toggle("a", True); app.pt.toggle("b", True)
-    app.prof_delete(); assert [p["name"] for p in app.pdata["profiles"]] == ["GameX"]
+    app.prof_delete(); assert [p["name"] for p in app.pdata["profiles"]] == ["GameX", "Mi Juego"]
     print("perfiles: casillas en todas las listas OK")
 
     # --- persistencia del panel ---

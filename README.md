@@ -16,8 +16,9 @@ Descarga `AltaPrioridad.exe` desde *Releases*. Es portable (Windows 10/11 de 64 
 A la derecha de la ventana hay un panel acoplado con los procesos en ejecución. Se pliega y despliega con la flecha de su borde (la ventana se estrecha o se ensancha con él; el estado se recuerda).
 
 - **Ancho ajustable**: arrastra el divisor entre el panel general y el de procesos. El ancho es independiente del panel general y se recuerda.
-- **Doble clic** en un proceso, o **◀ Agregar**: lo agrega al registro permanente con la prioridad elegida. Los ya agregados salen del panel. **Quitar ▶** quita los marcados del registro.
-- El panel solo funciona en la pestaña **Permanente**; en **Perfiles de juego** queda deshabilitado (gris). Allí los ejecutables de un perfil se agregan con *Agregar procesos...* y se quitan con *Quitar marcados*.
+- En **Permanente (registro)**: **Doble clic** en un proceso, o **◀ Agregar**, lo agrega al registro con la prioridad elegida. **Quitar ▶** quita los marcados del registro.
+- En **Perfiles de juego**: **Doble clic** o **◀ Agregar** crea un **perfil nuevo** con los procesos elegidos como ejecutables del juego y **pide el nombre** del perfil (no acepta vacío ni repetido). **Quitar ▶** elimina los perfiles marcados, con confirmación.
+- Los procesos ya agregados salen del panel. Para añadir ejecutables a un perfil que ya existe, usa *Agregar procesos...* y *Quitar marcados* junto a su lista de ejecutables.
 - Todas las listas tienen **casillas**: clic en la casilla marca una fila, clic en el encabezado de casillas marca o desmarca todas, y las acciones usan las filas marcadas (si no hay ninguna, las resaltadas).
 - **Ordenar**: clic en el encabezado de cualquier columna ordena ascendente (▲); otro clic, descendente (▼). Números como números y prioridades por nivel (Inactiva < Baja < Normal < Sobre normal < Alta < Tiempo real).
 
