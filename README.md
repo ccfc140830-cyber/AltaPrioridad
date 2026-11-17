@@ -11,6 +11,15 @@ Descarga `AltaPrioridad.exe` desde *Releases*. Es portable (Windows 10/11 de 64 
 - Cada cambio genera un respaldo JSON en `%LOCALAPPDATA%\AltaPrioridad\respaldos` (últimos 20).
 - *Tiempo real* está bloqueado hasta marcar la casilla y confirmar; los procesos críticos de Windows piden confirmación.
 
+## Iniciar con Windows y modo minimizado
+
+- Casilla **Iniciar con Windows** (barra inferior): crea una tarea programada al iniciar sesión (con 10 s de espera), con privilegios máximos y sin límite de ejecución, que abre la app **en segundo plano** (sin ventana, con el icono junto al reloj) y sin pedir permiso. Se usa una tarea y no la clave `Run` porque Windows no arranca desde `Run` programas que piden administrador. Desmarcar la borra.
+- **Al cerrar (X)**: un diálogo ofrece *Dejar en segundo plano* o *Cerrar del todo* (o Cancelar), con la opción *Recordar mi elección*. La preferencia se cambia siempre en el selector **Al cerrar** de la barra inferior (Preguntar / Segundo plano / Cerrar).
+  - **Segundo plano**: la ventana desaparece y el programa sigue detectando juegos y aplicando los perfiles. El icono junto al reloj la reabre con un clic; el menú del icono (clic derecho) tiene *Abrir* y *Salir*. Volver a ejecutar el programa también reabre la ventana de la copia que ya está corriendo (solo hay una a la vez). En Windows 11 los iconos nuevos pueden quedar bajo la flecha ^ de la bandeja: arrástralo fuera para dejarlo siempre visible.
+  - **Cerrar del todo** (o *Salir* del menú del icono): detiene la vigilancia y devuelve los procesos a su prioridad original.
+- **Modo ahorro** (en segundo plano o minimizada): no refresca la interfaz, vigila cada 3 s (en vez de 2 s), baja su propia prioridad a "Por debajo de lo normal", usa EcoQoS (núcleos eficientes) y recorta su memoria. Al volver a mostrar la ventana recupera su prioridad original.
+- Medido en una prueba de 10 s: ~0,03 s de CPU y ~6 MB de memoria en segundo plano frente a 39 MB con la ventana visible.
+
 ## Panel de procesos
 
 A la derecha de la ventana hay un panel acoplado con los procesos en ejecución. Se pliega y despliega con la flecha de su borde (la ventana se estrecha o se ensancha con él; el estado se recuerda).

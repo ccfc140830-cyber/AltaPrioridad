@@ -8,7 +8,13 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import prio_core as core
 import prio_profiles as prof
+import prio_startup as startup
+import prio_tray
 
+CLOSE_NAMES = {"ask": "Preguntar", "background": "Segundo plano", "quit": "Cerrar"}   # accion al pulsar la X
+IDLE_MS = 2000   # cada cuanto vigila el motor con la ventana visible
+MIN_MS = 3000    # y minimizada (el juego se detecta en <= 3 s, con menos despertares)
+TRAY_POLL_MS = 300   # cada cuanto atiende el icono de la bandeja (clic, 2.a copia)
 PANEL_W = 330   # ancho inicial del panel de procesos desplegado
 PANEL_MIN, PANEL_MAX = 200, 700   # limites al arrastrar el divisor
 STRIP_W = 28    # ancho de la tira con la flecha cuando esta plegado
@@ -34,7 +40,8 @@ def relaunch_as_admin():
     else:
         exe = sys.executable
         params = f'"{os.path.abspath(__file__)}"'
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+    extra = " ".join(f'"{a}"' for a in sys.argv[1:])   # conserva --minimizado al pedir permisos
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, f"{params} {extra}".strip(), None, 1)
 
 
 class CheckTree(ttk.Treeview):
@@ -339,12 +346,55 @@ class ProfileDialog(tk.Toplevel):
         self.destroy()
 
 
+class CloseDialog(tk.Toplevel):
+    """Al pulsar la X: segundo plano o cerrar del todo. result = 'background' | 'quit' | None."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Cerrar Alta Prioridad")
+        self.transient(master)
+        self.resizable(False, False)
+        self.result = None
+        self.remember = False
+        self.v_rem = tk.BooleanVar(value=False)
+        f = ttk.Frame(self, padding=14)
+        f.pack()
+        ttk.Label(f, text="¿Qué quieres hacer con Alta Prioridad?", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(f, justify="left", wraplength=400, text=(
+            "Segundo plano: se cierra la ventana pero el programa sigue detectando juegos y aplicando tus "
+            "perfiles, casi sin consumir recursos. Vuelve a abrirla con el icono junto al reloj.\n\n"
+            "Cerrar del todo: detiene la vigilancia y devuelve los procesos a su prioridad original.")
+        ).pack(anchor="w", pady=10)
+        ttk.Checkbutton(f, text="Recordar mi elección (se cambia abajo, en «Al cerrar»)",
+                        variable=self.v_rem).pack(anchor="w", pady=(0, 10))
+        bb = ttk.Frame(f)
+        bb.pack(fill="x")
+        b = ttk.Button(bb, text="Dejar en segundo plano", command=lambda: self.pick("background"))
+        b.pack(side="left")
+        ttk.Button(bb, text="Cerrar del todo", command=lambda: self.pick("quit")).pack(side="left", padx=6)
+        ttk.Button(bb, text="Cancelar", command=self.destroy).pack(side="right")
+        b.focus_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Return>", lambda _e: self.pick("background"))
+        self.update_idletasks()
+        self.geometry(f"+{master.winfo_rootx() + 80}+{master.winfo_rooty() + 80}")
+        self.grab_set()
+
+    def pick(self, action):
+        self.result = action
+        self.remember = self.v_rem.get()
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Alta Prioridad - gestor de prioridad de CPU")
         self.pdata = prof.load()
         self.pdata.setdefault("panel", True)
+        if self.pdata.get("close_action") not in CLOSE_NAMES:
+            self.pdata["close_action"] = "ask"
+        self.tray = None
         self.engine = prof.Engine()
         self.engine.alive = {pid: (pp, exe) for pid, pp, exe in core.process_info()}
         self.panel_open = bool(self.pdata["panel"])
@@ -359,7 +409,21 @@ class App(tk.Tk):
         self.minsize(700, 560)
 
         self.status = tk.StringVar()
-        ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=4).pack(side="bottom", fill="x")
+        self._eco = False        # True mientras esta minimizada: sin refrescos de interfaz
+        self._auto_id = None
+        bottom = ttk.Frame(self)
+        bottom.pack(side="bottom", fill="x")
+        self.autostart = tk.BooleanVar(value=startup.is_enabled())
+        ttk.Checkbutton(bottom, text="Iniciar con Windows", variable=self.autostart,
+                        command=self.autostart_changed).pack(side="right", padx=8)
+        self.close_var = tk.StringVar(value=CLOSE_NAMES[self.pdata["close_action"]])
+        cb = ttk.Combobox(bottom, textvariable=self.close_var, values=list(CLOSE_NAMES.values()),
+                          state="readonly", width=14)
+        cb.pack(side="right")
+        cb.bind("<<ComboboxSelected>>", self.close_pref_changed)
+        ttk.Label(bottom, text="Al cerrar:").pack(side="right", padx=(8, 2))
+        ttk.Label(bottom, textvariable=self.status, relief="sunken", anchor="w", padding=4
+                  ).pack(side="left", fill="x", expand=True)
         # Divisor arrastrable: el ancho del panel de procesos es independiente del panel general.
         self.paned = tk.PanedWindow(self, orient="horizontal", sashwidth=6, sashrelief="raised",
                                     bd=0, bg="#c8c8c8", opaqueresize=True)
@@ -378,12 +442,22 @@ class App(tk.Tk):
         self.build_profiles(ptab)
         self.build_dock()
         self.nb.bind("<<NotebookTabChanged>>", lambda _: self.on_context())
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        try:
+            self.tray = prio_tray.Tray("Alta Prioridad: vigilando juegos")
+            self.after(TRAY_POLL_MS, self._poll_tray)
+        except OSError:
+            self.tray = None      # sin bandeja no hay segundo plano: la X cierra del todo
+        self.protocol("WM_DELETE_WINDOW", self.on_close_request)
         self.set_panel(self.panel_open, resize=False)
         self.refresh()
         self.refresh_profiles()
-        self.after(3000, self.autorefresh)
+        self._auto_id = self.after(3000, self.autorefresh)
         self.after(1500, self.prof_tick)
+        self.bind("<Unmap>", self._on_unmap)
+        self.bind("<Map>", self._on_map)
+        if self.autostart.get() and not startup.points_here():
+            self.say("El inicio con Windows apunta a otra copia del programa: desmarca y vuelve a marcar "
+                     "'Iniciar con Windows' para actualizarlo.")
 
     # ---- construccion de pestanas ----
     def build_registry(self, reg):
@@ -664,12 +738,47 @@ class App(tk.Tk):
     def prof_tick(self, reschedule=True):
         try:
             self.engine.tick(self.pdata["profiles"] if self.pdata["watch"] else [])
-            self.refresh_profiles()
-            self.refresh_panel()
+            if not self._eco:        # minimizada: el motor sigue, la interfaz no se toca
+                self.refresh_profiles()
+                self.refresh_panel()
         except Exception as e:  # el motor nunca debe tumbar la app
             self.say(f"Perfiles: {e}")
         if reschedule:
-            self.after(2000, self.prof_tick)
+            self.after(MIN_MS if self._eco else IDLE_MS, self.prof_tick)
+
+    # ---- minimizada: lo minimo de recursos, pero los perfiles siguen vigilando ----
+    def _on_unmap(self, e):
+        if e.widget is self and self.state() in ("iconic", "withdrawn"):
+            self.set_eco(True)
+
+    def _on_map(self, e):
+        if e.widget is self:
+            self.set_eco(False)
+
+    def set_eco(self, flag):
+        if flag == self._eco:
+            return
+        self._eco = flag
+        core.set_self_eco(flag)
+        if not flag:                 # al restaurar, ponerse al dia de una vez
+            self.refresh()
+            self.refresh_profiles()
+            self.refresh_panel()
+            if self._auto_id is None:
+                self.autorefresh()
+
+    def autostart_changed(self):
+        want = self.autostart.get()
+        if not self.guard_admin():
+            self.autostart.set(not want)
+            return
+        ok, msg = startup.enable() if want else startup.disable()
+        if not ok:
+            self.autostart.set(not want)
+            messagebox.showerror("Inicio con Windows", msg or "No se pudo cambiar la tarea programada.")
+            return
+        self.say("Se iniciara con Windows en segundo plano (icono junto al reloj), sin pedir permiso." if want
+                 else "Ya no se inicia con Windows.")
 
     def refresh_profiles(self):
         st = self.engine.status()
@@ -788,10 +897,70 @@ class App(tk.Tk):
         self.prof_tick(reschedule=False)
         self.say(f"{made} perfil(es) creado(s) con valores por defecto. Ajustalos con Editar...")
 
+    # ---- cerrar: segundo plano o del todo ----
+    def on_close_request(self):
+        """Pulsar la X: actua segun 'Al cerrar'. El menu 'Salir' de la bandeja cierra del todo sin preguntar."""
+        if self.tray is None:
+            self.on_close()
+            return
+        action, notify = self.pdata["close_action"], False
+        if action == "ask":
+            d = CloseDialog(self)
+            self.wait_window(d)
+            if d.result is None:
+                return                     # Cancelar: la ventana sigue abierta
+            action, notify = d.result, not d.remember
+            if d.remember:
+                self.pdata["close_action"] = action
+                self.close_var.set(CLOSE_NAMES[action])
+                self.save_profiles()
+        if action == "background":
+            self.go_background(notify=notify)
+        else:
+            self.on_close()
+
+    def close_pref_changed(self, _e=None):
+        inv = {v: k for k, v in CLOSE_NAMES.items()}
+        self.pdata["close_action"] = inv[self.close_var.get()]
+        self.save_profiles()
+
+    def go_background(self, notify=True):
+        """Sin ventana: el motor sigue vigilando; el icono junto al reloj la vuelve a abrir."""
+        if self.tray is None or not self.tray.show_icon():
+            self.iconify()                 # sin bandeja disponible: minimizar a la barra de tareas
+            return
+        self.withdraw()
+        self.set_eco(True)
+        if notify:
+            self.tray.notify("Alta Prioridad", "Sigue vigilando tus juegos en segundo plano. "
+                             "Haz clic en este icono para abrir la ventana.")
+
+    def _poll_tray(self):
+        """Atiende los clics del icono y las peticiones de una 2.a copia (ver nota en prio_tray)."""
+        while self.tray is not None and self.tray.events:
+            ev = self.tray.events.popleft()
+            if ev == "show":
+                self.show_window()
+            elif ev == "quit":
+                self.on_close()
+                return
+        self.after(TRAY_POLL_MS, self._poll_tray)
+
+    def show_window(self):
+        if self.tray is not None:
+            self.tray.hide_icon()
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+
     def on_close(self):
+        """Cierre total: devuelve los procesos a su prioridad original y sale."""
         try:
             self.engine.restore_all()
         finally:
+            if self.tray is not None:
+                self.tray.destroy()
             self.destroy()
 
     # ---- registro permanente ----
@@ -834,8 +1003,11 @@ class App(tk.Tk):
         self.idle_say(f"{len(entries)} programa(s) con prioridad guardada.")
 
     def autorefresh(self):
+        self._auto_id = None
+        if self._eco:                # minimizada: se detiene; set_eco(False) lo reanuda
+            return
         self.refresh()
-        self.after(3000, self.autorefresh)
+        self._auto_id = self.after(3000, self.autorefresh)
 
     def confirm_system(self, exe):
         if exe.lower() in core.SYSTEM_EXES:
@@ -964,8 +1136,27 @@ class App(tk.Tk):
         self.say(f"Importadas {n} entradas.")
 
 
+def already_running():
+    """Una sola copia a la vez: con inicio automatico es facil abrir una segunda y dos motores se pisarian."""
+    kernel = ctypes.windll.kernel32
+    kernel.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel.CreateMutexW(None, False, "Local\\AltaPrioridad_UnaInstancia"
+                                 + os.environ.get("PRIORIDAD_TEST_TASK", ""))
+    err = kernel.GetLastError()
+    already_running.handle = handle          # mantenerlo vivo hasta salir
+    return err in (183, 5)                   # ALREADY_EXISTS / ACCESS_DENIED (la otra es elevada)
+
+
 if __name__ == "__main__":
     if not is_admin() and not os.environ.get("PRIORIDAD_TEST_KEY"):
         relaunch_as_admin()
         sys.exit(0)
-    App().mainloop()
+    if already_running():                    # 2.a copia: pide a la primera que muestre su ventana
+        if not prio_tray.signal_existing():
+            ctypes.windll.user32.MessageBoxW(None, "AltaPrioridad ya esta abierta. Revisa la barra de tareas.",
+                                             "Alta Prioridad", 0x40)
+        sys.exit(0)
+    app = App()
+    if startup.ARG_MIN in sys.argv:          # arrancada por Windows: directo a segundo plano
+        app.go_background(notify=False)
+    app.mainloop()

@@ -159,6 +159,13 @@ k32.GetPriorityClass.argtypes = [wintypes.HANDLE]
 k32.SetPriorityClass.restype = wintypes.BOOL
 k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 k32.CloseHandle.argtypes = [wintypes.HANDLE]
+k32.GetCurrentProcess.restype = wintypes.HANDLE
+k32.GetCurrentProcess.argtypes = []
+try:
+    k32.SetProcessInformation.restype = wintypes.BOOL
+    k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+except AttributeError:   # Windows sin SetProcessInformation: set_self_eco usa solo la prioridad
+    pass
 k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
@@ -259,6 +266,40 @@ def set_live_priority(pid, prio_name):
         return bool(k32.SetPriorityClass(h, PRIORITIES[prio_name][1]))
     finally:
         k32.CloseHandle(h)
+
+
+class _PowerThrottling(ctypes.Structure):
+    _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+
+_psapi = ctypes.WinDLL("psapi", use_last_error=True)
+_psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+_psapi.EmptyWorkingSet.restype = wintypes.BOOL
+_saved_class = [None]
+
+
+def set_self_eco(on):
+    """Modo ahorro de ESTA app: prioridad Por debajo de lo normal + EcoQoS (nucleos eficientes,
+    menos frecuencia) + recorte de memoria. Al apagarlo vuelve a la prioridad que tenia antes
+    y deja el EcoQoS en manos del sistema."""
+    h = k32.GetCurrentProcess()
+    below, idle = PRIORITIES["Por debajo de lo normal"][1], PRIORITIES["Inactiva (Idle)"][1]
+    if on:
+        cur = k32.GetPriorityClass(h)
+        if _saved_class[0] is None:
+            _saved_class[0] = cur
+        if cur != idle:
+            k32.SetPriorityClass(h, below)
+    else:
+        k32.SetPriorityClass(h, _saved_class[0] or PRIORITIES["Normal"][1])
+        _saved_class[0] = None
+    try:
+        st = _PowerThrottling(1, 1, 1) if on else _PowerThrottling(1, 0, 0)  # EXECUTION_SPEED
+        k32.SetProcessInformation(h, 4, ctypes.byref(st), ctypes.sizeof(st))  # 4 = ProcessPowerThrottling
+        if on:
+            _psapi.EmptyWorkingSet(h)
+    except (AttributeError, OSError):
+        pass  # Windows antiguo: queda solo la prioridad baja
 
 
 def live_state():

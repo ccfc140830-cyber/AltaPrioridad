@@ -1,7 +1,9 @@
 ﻿import os, shutil, subprocess, tempfile, time, winreg
+import tkinter as tk
 tmp = tempfile.mkdtemp(prefix="prio_gui_")
 os.environ["LOCALAPPDATA"] = tmp                       # no tocar perfiles.json ni respaldos reales
 os.environ["PRIORIDAD_TEST_KEY"] = r"Software\AltaPrioridadTest"
+os.environ["PRIORIDAD_TEST_TASK"] = "AltaPrioridadPrueba"   # nunca tocar la tarea real
 import prioridad as ui, prio_core as core, prio_profiles as pp
 
 gdir = os.path.join(tmp, "Juegos", "GameX"); os.makedirs(gdir)
@@ -212,9 +214,70 @@ try:
     app.prof_delete(); assert [p["name"] for p in app.pdata["profiles"]] == ["GameX", "Mi Juego"]
     print("perfiles: casillas en todas las listas OK")
 
+    # --- iniciar con Windows (casilla): crea/borra la tarea y revierte si falla ---
+    calls = []
+    ui.startup.enable = lambda highest=True: (calls.append("on"), (True, ""))[1]
+    ui.startup.disable = lambda: (calls.append("off"), (True, ""))[1]
+    app.autostart.set(True); app.autostart_changed()
+    assert calls == ["on"] and "Windows" in app.status.get() and app.autostart.get() is True
+    app.autostart.set(False); app.autostart_changed()
+    assert calls == ["on", "off"] and app.autostart.get() is False
+    ui.startup.enable = lambda highest=True: (False, "Acceso denegado")
+    shown.clear()
+    app.autostart.set(True); app.autostart_changed()
+    assert app.autostart.get() is False and shown, "si falla, la casilla se revierte y avisa"
+    assert ui.already_running() is False and ui.already_running() is True, "una sola instancia"
+    print("iniciar con Windows (casilla) y una sola instancia OK")
+
     # --- persistencia del panel ---
     app.toggle_panel(); assert pp.load()["panel"] is False
-    app.on_close()
+
+    # --- cerrar con la X: preguntar, segundo plano (icono en la bandeja) o cerrar del todo ---
+    import prio_tray as pt
+    assert app.tray is not None and not app.tray.exists()
+    def wait(cond, secs=3.0):               # deja correr el bucle de Tk (el sondeo de la bandeja es de 300 ms)
+        end = time.time() + secs
+        while not cond() and time.time() < end:
+            app.update(); time.sleep(0.05)
+        return cond()
+    app.wait_window = lambda d: None
+    def dialog(result, remember=False):
+        class D:
+            def __init__(self, master): self.result, self.remember = result, remember
+        ui.CloseDialog = D
+    app.update(); assert app.state() == "normal"
+    dialog(None); app.on_close_request(); app.update()
+    assert app.state() == "normal" and app.pdata["close_action"] == "ask", "Cancelar no cierra ni recuerda"
+    dialog("background"); app.on_close_request(); app.update()
+    assert app.state() == "withdrawn" and app._eco and app.tray.exists(), "segundo plano: sin ventana, icono, ahorro"
+    pt.user32.SendMessageW(app.tray.hwnd, pt.CALLBACK_MSG, 1, pt.WM_LBUTTONUP)
+    assert wait(lambda: app.state() == "normal")
+    app.update(); assert not app.tray.exists() and not app._eco, "clic en el icono reabre"
+    dialog("background"); app.on_close_request(); app.update()
+    assert pt.signal_existing()
+    assert wait(lambda: app.state() == "normal"), "una 2.a copia reabre la ventana de la primera"
+    dialog("background"); app.on_close_request(); app.update()
+    app.tray.handle_command(pt.CMD_OPEN)
+    assert wait(lambda: app.state() == "normal"), "menu del icono: Abrir"
+    dialog("background", remember=True); app.on_close_request(); app.update()
+    assert app.pdata["close_action"] == "background" and app.close_var.get() == "Segundo plano"
+    assert pp.load()["close_action"] == "background", "eleccion guardada en disco"
+    app.show_window(); app.update()
+    def boom(master): raise AssertionError("no debe preguntar si ya se recordo la eleccion")
+    ui.CloseDialog = boom
+    app.on_close_request(); app.update()
+    assert app.state() == "withdrawn", "con la eleccion recordada no pregunta"
+    app.show_window(); app.update()
+    app.close_var.set("Preguntar"); app.close_pref_changed()
+    assert app.pdata["close_action"] == "ask" and pp.load()["close_action"] == "ask", "se cambia desde 'Al cerrar'"
+    app.close_var.set("Cerrar"); app.close_pref_changed()
+    print("cerrar: preguntar / segundo plano / recordar / icono OK")
+    app.on_close_request()                   # 'Cerrar' recordado: sale del todo
+    try:
+        app.winfo_exists(); raise AssertionError("la app debia cerrarse")
+    except tk.TclError:
+        pass
+    assert pt.signal_existing() is False, "al cerrar del todo desaparece la ventana de la bandeja"
     print("TODO OK")
 finally:
     for p in procs: p.kill()
